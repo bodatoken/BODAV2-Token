@@ -1,5 +1,5 @@
 /**
- *Submitted for verification at BscScan.com on 2021-07-24
+ *Submitted for verification at BscScan.com on 2021-09-03
 */
 
 // SPDX-License-Identifier: Unlicensed
@@ -1234,13 +1234,12 @@ contract BodaV2 is ERC20, Ownable {
     uint256 internal yeildFarmTokensInContract;
     uint256 internal bnbDividedRewardsInContract;
     uint256 internal marketingRewardInContract;
+    uint256 internal lpRewardInContract;
 
     uint256 public _yieldFarmingFeeBuy = 2;
     uint256 public _bnbDividendRewardsFeeBuy = 6;
     uint256 public _marketingFeeBuy = 3;
     uint256 public _LpFeeBuy = 1;
-
-    
 
     uint256 public _yieldFarmingFeeSell=2;
     uint256 public _bnbDividendRewardsFeeSell=13;
@@ -1248,16 +1247,29 @@ contract BodaV2 is ERC20, Ownable {
     uint256 public _DevelpmentFeeSell=3;
     
 
-    uint public percentPrecision = 1000;
+    uint public constant percentPrecision = 1000;
     uint public buyLimit = 10; // 0.01%
     uint public sellLimit = 1; // 0.1%
 
+    uint256 internal constant MAX_BUY_LIMIT = percentPrecision;
+    uint256 internal constant MAX_SELL_LIMIT = percentPrecision;
+
     address public yieldFarmAddress;
+
+
+    // BODA-BNB Lp locker
+
+    uint256 public bodaBnbLpLocked;
+    uint256 public lockStartTime;
+    uint256 public lockEndTime;
+
+    uint256 internal constant MIN_LOCK_TIME = 1 days;
+    uint256 internal constant MAX_LOCK_TIME = 30 days; 
 
 // ------------------------------------------------------------
 
     uint256 public bnbDividendRewardsFee;
-    uint256 public previousDogeDividendRewardsFee;
+    uint256 public previousBnbDividendRewardsFee;
 
     uint256 public marketingOrDevelpementFee;
     uint256 public previousMarketingFee;
@@ -1271,8 +1283,7 @@ contract BodaV2 is ERC20, Ownable {
     uint256 public sellFeeIncreaseFactor = 130;
 
     uint256 public gasForProcessing = 600000;
-    
-    address public presaleAddress;
+
 
     mapping (address => bool) private isExcludedFromFees;
 
@@ -1281,7 +1292,7 @@ contract BodaV2 is ERC20, Ownable {
     mapping (address => bool) public automatedMarketMakerPairs;
 
     event UpdateCakeDividendTracker(address indexed newAddress, address indexed oldAddress);
-    event UpdateDogeDividendTracker(address indexed newAddress, address indexed oldAddress);
+    event UpdateBnbDividendTracker(address indexed newAddress, address indexed oldAddress);
 
     event UpdateUniswapV2Router(address indexed newAddress, address indexed oldAddress);
     
@@ -1323,7 +1334,7 @@ contract BodaV2 is ERC20, Ownable {
     	address indexed processor
     );
     
-    event ProcessedDogeDividendTracker(
+    event ProcessedBnbDividendTracker(
     	uint256 iterations,
     	uint256 claims,
         uint256 lastProcessedIndex,
@@ -1332,7 +1343,18 @@ contract BodaV2 is ERC20, Ownable {
     	address indexed processor
     );
 
-   
+   event BodaBnbLocked(
+       uint256 bodaBnbLocked,
+       uint256 start,
+       uint256 end,
+       address lockOwner
+   );
+
+   event BodaBnbUnlocked(
+       uint256 bodaBnbUnlocked,
+       uint256 end,
+       address unlockOwner
+   );
 
     constructor(address _uniswapRouter02,address _marketWallet,address _dividendToken,address _yieldFarmAddress) ERC20("BODAV2", "BODAV2") {
     	bnbDividendTracker = new BnbDividendTracker(_dividendToken);
@@ -1388,14 +1410,14 @@ contract BodaV2 is ERC20, Ownable {
   	}
   	
   	
-  	function updateDogeDividendToken(address _newContract) external onlyOwner {
+  	function updateBnbDividendToken(address _newContract) external onlyOwner {
   	    bnbDividendToken = _newContract;
   	    bnbDividendTracker.setDividendTokenAddress(_newContract);
   	}
   	
 	
   	function updateMarketingWallet(address _newWallet) external onlyOwner {
-  	    require(_newWallet != marketingWallet, "DogeCake: The marketing wallet is already this address");
+  	    require(_newWallet != marketingWallet, "BODA: The marketing wallet is already this address");
         excludeFromFees(_newWallet, true);
         emit MarketingWalletUpdated(marketingWallet, _newWallet);
   	    marketingWallet = _newWallet;
@@ -1420,11 +1442,11 @@ contract BodaV2 is ERC20, Ownable {
     function setBnbDividendEnabled(bool _enabled) external onlyOwner {
         require(bnbDividendEnabled != _enabled, "Can't set flag to same status");
         if (_enabled == false) {
-            previousDogeDividendRewardsFee = bnbDividendRewardsFee;
+            previousBnbDividendRewardsFee = bnbDividendRewardsFee;
             bnbDividendRewardsFee = 0;
             bnbDividendEnabled = _enabled;
         } else {
-            bnbDividendRewardsFee = previousDogeDividendRewardsFee;
+            bnbDividendRewardsFee = previousBnbDividendRewardsFee;
             totalFees = bnbDividendRewardsFee.add(marketingOrDevelpementFee);
             bnbDividendEnabled = _enabled;
         }
@@ -1448,78 +1470,88 @@ contract BodaV2 is ERC20, Ownable {
     }
     
     function updateBnbDividendTracker(address newAddress) external onlyOwner {
-        require(newAddress != address(bnbDividendTracker), "DogeCake: The dividend tracker already has that address");
+        require(newAddress != address(bnbDividendTracker), "BODA: The dividend tracker already has that address");
 
         BnbDividendTracker newBnbDividendTracker = BnbDividendTracker(payable(newAddress));
 
-        require(newBnbDividendTracker.owner() == address(this), "DogeCake: The new dividend tracker must be owned by the DogeCake token contract");
+        require(newBnbDividendTracker.owner() == address(this), "BODA: The new dividend tracker must be owned by the BODA token contract");
 
         newBnbDividendTracker.excludeFromDividends(address(newBnbDividendTracker));
         newBnbDividendTracker.excludeFromDividends(address(this));
         newBnbDividendTracker.excludeFromDividends(address(uniswapV2Router));
         newBnbDividendTracker.excludeFromDividends(address(deadAddress));
 
-        emit UpdateDogeDividendTracker(newAddress, address(bnbDividendTracker));
+        emit UpdateBnbDividendTracker(newAddress, address(bnbDividendTracker));
 
         bnbDividendTracker = newBnbDividendTracker;
     }
     
     function updateBuyBnbDividendRewardFee(uint8 newFee) external onlyOwner {
-        require(newFee <= 6, "DogeCake: Fee must be less than 6%");
+        require(newFee <= 6, "BODA: Fee must be less than 6%");
         _bnbDividendRewardsFeeBuy = newFee;
         // totalFees = _bnbDividendRewardsFeeBuy.add(marketingOrDevelpementFee);
     }
 
     function updateSellBnbDividendRewardFee(uint8 newFee) external onlyOwner {
-        require(newFee <= 6, "DogeCake: Fee must be less than 6%");
+        require(newFee <= 6, "BODA: Fee must be less than 6%");
         _bnbDividendRewardsFeeSell = newFee;
         // totalFees = _bnbDividendRewardsFeeSell.add(marketingOrDevelpementFee);
     }
     
     function updateMarketingFeeBuy(uint8 newFee) external onlyOwner {
-        require(newFee <= 6, "DogeCake: Fee must be less than 6%");
+        require(newFee <= 6, "BODA: Fee must be less than 6%");
         _marketingFeeBuy = newFee;
         // totalFees = _marketingFeeBuy.add(bnbDividendRewardsFee);
     }
 
     function updateDevelopementFeeSell(uint8 newFee) external onlyOwner {
-        require(newFee <= 6, "DogeCake: Fee must be less than 6%");
+        require(newFee <= 6, "BODA: Fee must be less than 6%");
         _DevelpmentFeeSell = newFee;
         // totalFees = _DevelpmentFeeSell.add(_bnbDividendRewardsFeeBuy);
     }
 
     function updateYielFarmFeeBuy(uint8 newFee) external onlyOwner {
-        require(newFee <= 6, "DogeCake: Fee must be less than 6%");
+        require(newFee <= 6, "BODA: Fee must be less than 6%");
         _yieldFarmingFeeBuy = newFee;
         // totalFees = _DevelpmentFeeSell.add(_bnbDividendRewardsFeeBuy);
     }
 
     function updateYielFarmFeeSell(uint8 newFee) external onlyOwner {
-        require(newFee <= 6, "DogeCake: Fee must be less than 6%");
+        require(newFee <= 6, "BODA: Fee must be less than 6%");
         _yieldFarmingFeeSell = newFee;
         // totalFees = _DevelpmentFeeSell.add(_bnbDividendRewardsFeeBuy);
     }
 
     function updateLpFeeBuy(uint8 newFee) external onlyOwner {
-        require(newFee <= 6, "DogeCake: Fee must be less than 6%");
+        require(newFee <= 6, "BODA: Fee must be less than 6%");
         _LpFeeBuy = newFee;
         // totalFees = _DevelpmentFeeSell.add(_bnbDividendRewardsFeeBuy);
     }
 
     function updateLpFeeSell(uint8 newFee) external onlyOwner {
-        require(newFee <= 6, "DogeCake: Fee must be less than 6%");
+        require(newFee <= 6, "BODA: Fee must be less than 6%");
         _LpFeeSell = newFee;
         // totalFees = _DevelpmentFeeSell.add(_bnbDividendRewardsFeeBuy);
     }
 
+    function updateBuyLimit(uint8 newBuyLimit) external onlyOwner{
+        require(newBuyLimit <= MAX_BUY_LIMIT,"Buy is too high !!!");
+        buyLimit = newBuyLimit;
+    }
+
+    function updateSellLimit(uint8 newSellLimit) external onlyOwner{
+        require(newSellLimit <= MAX_SELL_LIMIT,"Sell is too high !!!");
+        sellLimit = newSellLimit;
+    }
+
     function updateUniswapV2Router(address newAddress) external onlyOwner {
-        require(newAddress != address(uniswapV2Router), "DogeCake: The router already has that address");
+        require(newAddress != address(uniswapV2Router), "BODA: The router already has that address");
         emit UpdateUniswapV2Router(newAddress, address(uniswapV2Router));
         uniswapV2Router = IUniswapV2Router02(newAddress);
     }
 
     function excludeFromFees(address account, bool excluded) public onlyOwner {
-        require(isExcludedFromFees[account] != excluded, "DogeCake: Account is already exluded from fees");
+        require(isExcludedFromFees[account] != excluded, "BODA: Account is already exluded from fees");
         isExcludedFromFees[account] = excluded;
 
         emit ExcludeFromFees(account, excluded);
@@ -1538,13 +1570,13 @@ contract BodaV2 is ERC20, Ownable {
     }
 
     function setAutomatedMarketMakerPair(address pair, bool value) public onlyOwner {
-        require(pair != uniswapV2Pair, "DogeCake: The PancakeSwap pair cannot be removed from automatedMarketMakerPairs");
+        require(pair != uniswapV2Pair, "BODA: The PancakeSwap pair cannot be removed from automatedMarketMakerPairs");
 
         _setAutomatedMarketMakerPair(pair, value);
     }
 
     function _setAutomatedMarketMakerPair(address pair, bool value) private onlyOwner {
-        require(automatedMarketMakerPairs[pair] != value, "DogeCake: Automated market maker pair is already set to that value");
+        require(automatedMarketMakerPairs[pair] != value, "BODA: Automated market maker pair is already set to that value");
         automatedMarketMakerPairs[pair] = value;
 
         if(value) {
@@ -1555,7 +1587,7 @@ contract BodaV2 is ERC20, Ownable {
     }
 
     function updateGasForProcessing(uint256 newValue) external onlyOwner {
-        require(newValue != gasForProcessing, "DogeCake: Cannot update gasForProcessing to same value");
+        require(newValue != gasForProcessing, "BODA: Cannot update gasForProcessing to same value");
         gasForProcessing = newValue;
         emit GasForProcessingUpdated(newValue, gasForProcessing);
     }
@@ -1568,11 +1600,11 @@ contract BodaV2 is ERC20, Ownable {
         bnbDividendTracker.updateClaimWait(claimWait);
     }
     
-    function getDogeClaimWait() external view returns(uint256) {
+    function getBnbClaimWait() external view returns(uint256) {
         return bnbDividendTracker.claimWait();
     }
     
-    function getTotalDogeDividendsDistributed() external view returns (uint256) {
+    function getTotalBnbDividendsDistributed() external view returns (uint256) {
         return bnbDividendTracker.totalDividendsDistributed();
     }
 
@@ -1580,16 +1612,16 @@ contract BodaV2 is ERC20, Ownable {
         return isExcludedFromFees[account];
     }
 
-  	function withdrawableDogeDividendOf(address account) external view returns(uint256) {
+  	function withdrawableBnbDividendOf(address account) external view returns(uint256) {
     	return bnbDividendTracker.withdrawableDividendOf(account);
   	}
 
 	
-	function dogeDividendTokenBalanceOf(address account) external view returns (uint256) {
+	function bnbDividendTokenBalanceOf(address account) external view returns (uint256) {
 		return bnbDividendTracker.balanceOf(account);
 	}
     
-    function getAccountDogeDividendsInfo(address account)
+    function getAccountBnbDividendsInfo(address account)
         external view returns (
             address,
             int256,
@@ -1603,7 +1635,7 @@ contract BodaV2 is ERC20, Ownable {
     }
 
     
-    function getAccountDogeDividendsInfoAtIndex(uint256 index)
+    function getAccountBnbDividendsInfoAtIndex(uint256 index)
         external view returns (
             address,
             int256,
@@ -1618,8 +1650,8 @@ contract BodaV2 is ERC20, Ownable {
 
 	function processDividendTracker(uint256 gas) external onlyOwner {
 		
-		(uint256 dogeIterations, uint256 dogeClaims, uint256 dogeLastProcessedIndex) = bnbDividendTracker.process(gas);
-		emit ProcessedDogeDividendTracker(dogeIterations, dogeClaims, dogeLastProcessedIndex, false, gas, tx.origin);
+		(uint256 bnbIterations, uint256 bnbClaims, uint256 bnbLastProcessedIndex) = bnbDividendTracker.process(gas);
+		emit ProcessedBnbDividendTracker(bnbIterations, bnbClaims, bnbLastProcessedIndex, false, gas, tx.origin);
     }
     
     function rand() internal view returns(uint256) {
@@ -1644,11 +1676,11 @@ contract BodaV2 is ERC20, Ownable {
 		bnbDividendTracker.processAccount(payable(msg.sender), false);
     }
     
-    function getLastDogeDividendProcessedIndex() external view returns(uint256) {
+    function getLastBnbDividendProcessedIndex() external view returns(uint256) {
     	return bnbDividendTracker.getLastProcessedIndex();
     }
     
-    function getNumberOfDogeDividendTokenHolders() external view returns(uint256) {
+    function getNumberOfBnbDividendTokenHolders() external view returns(uint256) {
         return bnbDividendTracker.getNumberOfTokenHolders();
     }
 
@@ -1660,7 +1692,7 @@ contract BodaV2 is ERC20, Ownable {
         // uint256 fee;
         require(from != address(0), "ERC20: transfer from the zero address");
         require(to != address(0), "ERC20: transfer to the zero address");
-        require(tradingIsEnabled || (isExcludedFromFees[from] || isExcludedFromFees[to]), "DogeCake: Trading has not started yet");
+        require(tradingIsEnabled || (isExcludedFromFees[from] || isExcludedFromFees[to]), "BODA: Trading has not started yet");
         
         bool excludedAccount = isExcludedFromFees[from] || isExcludedFromFees[to];
         
@@ -1730,25 +1762,35 @@ contract BodaV2 is ERC20, Ownable {
 
         if(takeFee) {
 
-            totalFees = bnbDividendRewardsFee.add(marketingOrDevelpementFee)
-                            .add(yieldFarmingFee);
+            // totalFees = bnbDividendRewardsFee.add(marketingOrDevelpementFee)
+            //                 .add(yieldFarmingFee).add(lpFee);
 
-        	uint256 fees = amount.div(100).mul(totalFees);
+            uint256 fees;
+
+            uint256 tmpMarketingRewardPercent;
+            uint256 tmpBnbDividedRewardsInContract;
+            uint256 tmpLpRewardInContract;
+            uint256 tmpYeildFarmTokensInContract;
+
+            tmpMarketingRewardPercent = amount.mul(marketingOrDevelpementFee).div(100);
+            tmpBnbDividedRewardsInContract = amount.mul(bnbDividendRewardsFee).div(100);
+            tmpLpRewardInContract = amount.mul(lpFee).div(100);
+            tmpYeildFarmTokensInContract = amount.mul(yieldFarmingFee).div(100);
+
+            fees = tmpMarketingRewardPercent.add(tmpBnbDividedRewardsInContract)
+                            .add(tmpLpRewardInContract).add(tmpYeildFarmTokensInContract);
+
+            yeildFarmTokensInContract = yeildFarmTokensInContract.add(tmpMarketingRewardPercent);
+            bnbDividedRewardsInContract = bnbDividedRewardsInContract.add(tmpBnbDividedRewardsInContract);
+            marketingRewardInContract = marketingRewardInContract.add(tmpMarketingRewardPercent);
+            lpRewardInContract = lpRewardInContract.add(tmpYeildFarmTokensInContract);
 
             // if sell, multiply by 1.2
             if(automatedMarketMakerPairs[to]) {
                 fees = fees.div(100).mul(sellFeeIncreaseFactor);
             }
 
-            marketingRewardInContract = amount.mul(marketingOrDevelpementFee).div(100);
-            bnbDividedRewardsInContract = amount.mul(bnbDividendRewardsFee).div(100);
-
-            uint256 _lpfee = amount.mul(lpFee).div(100);
-            super._transfer(from,owner(),_lpfee);
-
-        	amount = amount.sub(fees);
-
-            
+        	amount = amount.sub(fees); 
             super._transfer(from, address(this), fees);
         }
 
@@ -1761,7 +1803,7 @@ contract BodaV2 is ERC20, Ownable {
 	    	uint256 gas = gasForProcessing;
 	    	
 	    	try bnbDividendTracker.process(gas) returns (uint256 iterations, uint256 claims, uint256 lastProcessedIndex) {
-	    		emit ProcessedDogeDividendTracker(iterations, claims, lastProcessedIndex, true, gas, tx.origin);
+	    		emit ProcessedBnbDividendTracker(iterations, claims, lastProcessedIndex, true, gas, tx.origin);
 	    	}
 	    	catch {
 
@@ -1769,6 +1811,38 @@ contract BodaV2 is ERC20, Ownable {
         }
     }
     
+    // Approve on BODA-BNB Lp pair
+    function LockBodaBnbLp(uint256 _lpTokenAmount,uint256 _unlockTime) onlyOwner external {
+        require(_unlockTime >= MIN_LOCK_TIME,"UnLock time should be more !!!");
+        require(_unlockTime <= MAX_LOCK_TIME,"UnLock time should be less !!!");
+
+        lockStartTime = block.timestamp;
+        lockEndTime = lockStartTime.add(_unlockTime);
+
+        IUniswapV2Pair(uniswapV2Pair).transferFrom(msg.sender,address(this),_lpTokenAmount);
+
+        bodaBnbLpLocked = _lpTokenAmount;
+
+        emit BodaBnbLocked(bodaBnbLpLocked,lockStartTime,lockEndTime,msg.sender);
+    }
+
+    function UnlockBodaBnbLp() onlyOwner external {
+        require(block.timestamp >= lockEndTime,"time not reach yet !!!");
+        IUniswapV2Pair(uniswapV2Pair).transfer(msg.sender,bodaBnbLpLocked);
+
+        emit BodaBnbUnlocked(bodaBnbLpLocked,block.timestamp,msg.sender);
+    } 
+
+    function transferLpFunds() onlyOwner external {
+        super._transfer(address(this),owner(),lpRewardInContract);
+        lpRewardInContract = 0;
+    }
+
+    function transferMarketingOrDevelopementFee() onlyOwner external {
+        super._transfer(address(this),marketingWallet,marketingRewardInContract);
+        marketingRewardInContract = 0;
+    }
+
     function addLiquidity(uint256 tokenAmount, uint256 bnbAmount) private {
         
         // approve token transfer to cover all possible scenarios
@@ -1848,8 +1922,8 @@ contract BodaV2 is ERC20, Ownable {
     
     function swapAndSendBnbDividends(uint256 tokens) private {
         swapTokensForDividendToken(tokens, address(this), bnbDividendToken);
-        uint256 dogeDividends = IERC20(bnbDividendToken).balanceOf(address(this));
-        transferDividends(bnbDividendToken, address(bnbDividendTracker), bnbDividendTracker, dogeDividends);
+        uint256 bnbDividends = IERC20(bnbDividendToken).balanceOf(address(this));
+        transferDividends(bnbDividendToken, address(bnbDividendTracker), bnbDividendTracker, bnbDividends);
     }
     
     function transferToWallet(address payable recipient, uint256 amount) private {
@@ -1886,17 +1960,17 @@ contract BnbDividendTracker is DividendPayingToken, Ownable {
 
     event Claim(address indexed account, uint256 amount, bool indexed automatic);
 
-    constructor(address _dividendToken) DividendPayingToken("DogeCake_Doge_Dividend_Tracker", "DogeCake_Doge_Dividend_Tracker", _dividendToken) {
+    constructor(address _dividendToken) DividendPayingToken("BODA-BNB Dividend Tracker", "BODA-BNB Dividend Tracker", _dividendToken) {
     	claimWait = 3600;
-        minimumTokenBalanceForDividends = 30000000 * (10**18); //must hold 30000000+ tokens
+        minimumTokenBalanceForDividends = 30000000000 * (10**18); //must hold 30,000,000,000+ tokens
     }
 
     function _transfer(address, address, uint256) pure internal override {
-        require(false, "DogeCake_Doge_Dividend_Tracker: No transfers allowed");
+        require(false, "BODA-BNB Dividend Tracker: No transfers allowed");
     }
 
     function withdrawDividend() pure public override {
-        require(false, "DogeCake_Doge_Dividend_Tracker: withdrawDividend disabled. Use the 'claim' function on the main DogeCake contract.");
+        require(false, "BODA-BNB Dividend Tracker: withdrawDividend disabled. Use the 'claim' function on the main BODA contract.");
     }
     
     function setDividendTokenAddress(address newToken) external override onlyOwner {
@@ -1919,8 +1993,8 @@ contract BnbDividendTracker is DividendPayingToken, Ownable {
     }
 
     function updateClaimWait(uint256 newClaimWait) external onlyOwner {
-        require(newClaimWait >= 3600 && newClaimWait <= 86400, "DogeCake_Doge_Dividend_Tracker: claimWait must be updated to between 1 and 24 hours");
-        require(newClaimWait != claimWait, "DogeCake_Doge_Dividend_Tracker: Cannot update claimWait to same value");
+        require(newClaimWait >= 3600 && newClaimWait <= 86400, "BODA_BNB_Dividend_Tracker: claimWait must be updated to between 1 and 24 hours");
+        require(newClaimWait != claimWait, "BODA_BNB_Dividend_Tracker: Cannot update claimWait to same value");
         emit ClaimWaitUpdated(newClaimWait, claimWait);
         claimWait = newClaimWait;
     }
